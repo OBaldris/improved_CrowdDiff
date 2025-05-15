@@ -47,7 +47,7 @@ def get_arg_parser():
 
     # count bound
     parser.add_argument('--lower_bound', default=0, type=int)
-    parser.add_argument('--upper_bound', default=np.Inf, type=int)
+    parser.add_argument('--upper_bound', default=np.inf, type=int)
 
     return parser
 
@@ -57,6 +57,7 @@ def main(args):
     # dataset directiors
     data_dir = os.path.join(args.data_dir, args.dataset)
     mode = args.mode
+    print(data_dir)
 
     # output directory
     output_dir = os.path.join(args.output_dir, args.dataset)
@@ -220,7 +221,7 @@ def create_dot_map(locations, image_size):
 
     density = np.zeros(image_size[:-1])
     for x,y in locations:
-        x, y = int(x), int(y)
+        x, y = int(x)-1, int(y)-1
         density[y,x] = 1.
     
     return density
