@@ -1,3 +1,9 @@
+import math
+import random
+import pandas as pd
+import cv2
+import os
+
 from PIL import Image
 import blobfile as bf
 from mpi4py import MPI
@@ -6,7 +12,16 @@ from torch.utils.data import DataLoader, Dataset
 
 
 def load_data(
-    *, data_dir, batch_size, image_size, class_cond=False, deterministic=False
+    *,
+    data_dir,
+    batch_size,
+    image_size,
+    normalizer,
+    pred_channels,
+    class_cond=False,
+    deterministic=False,
+    random_crop=False,
+    random_flip=True,
 ):
     """
     For a dataset, create a generator over (images, kwargs) pairs.
@@ -23,6 +38,8 @@ def load_data(
                        label. If classes are not available and this is true, an
                        exception will be raised.
     :param deterministic: if True, yield results in a deterministic order.
+    :param random_crop: if True, randomly crop the images for augmentation.
+    :param random_flip: if True, randomly flip the images for augmentation.
     """
     if not data_dir:
         raise ValueError("unspecified data directory")
@@ -37,9 +54,13 @@ def load_data(
     dataset = ImageDataset(
         image_size,
         all_files,
+        normalizer,
+        pred_channels,
         classes=classes,
         shard=MPI.COMM_WORLD.Get_rank(),
         num_shards=MPI.COMM_WORLD.Get_size(),
+        random_crop=random_crop,
+        random_flip=random_flip,
     )
     if deterministic:
         loader = DataLoader(
@@ -66,41 +87,63 @@ def _list_image_files_recursively(data_dir):
 
 
 class ImageDataset(Dataset):
-    def __init__(self, resolution, image_paths, classes=None, shard=0, num_shards=1):
+    def __init__(
+        self,
+        resolution,
+        image_paths,
+        normalizer,
+        pred_channels,
+        classes=None,
+        shard=0,
+        num_shards=1,
+        random_crop=False,
+        random_flip=True,
+    ):
         super().__init__()
         self.resolution = resolution
         self.local_images = image_paths[shard:][::num_shards]
         self.local_classes = None if classes is None else classes[shard:][::num_shards]
+        self.random_crop = random_crop
+        self.random_flip = random_flip
+        self.normalizer = normalizer
+        self.pred_channels = pred_channels
 
     def __len__(self):
         return len(self.local_images)
 
     def __getitem__(self, idx):
-        path = self.local_images[idx]
-        with bf.BlobFile(path, "rb") as f:
-            pil_image = Image.open(f)
-            pil_image.load()
+        # get the crowd image
+        path = self.local_images[idx]        
+        
+        image = Image.open(path)
+        image = np.array(image.convert('RGB'))
+        image = image.astype(np.float32) / 127.5 - 1        
 
-        # We are not on a new enough PIL to support the `reducing_gap`
-        # argument, which uses BOX downsampling at powers of two first.
-        # Thus, we do it by hand to improve downsample quality.
-        while min(*pil_image.size) >= 2 * self.resolution:
-            pil_image = pil_image.resize(
-                tuple(x // 2 for x in pil_image.size), resample=Image.BOX
-            )
+        # get the density map for the image
+        path = path.replace('train','train_den').replace('jpg','csv')
+        path = path.replace('test','test_den').replace('jpg','csv')
 
-        scale = self.resolution / min(*pil_image.size)
-        pil_image = pil_image.resize(
-            tuple(round(x * scale) for x in pil_image.size), resample=Image.BICUBIC
-        )
+        csv_density = np.asarray(pd.read_csv(path, header=None).values)
+        count =  np.sum(csv_density)
+        count = np.ceil(count) if count > 1 else count
+        csv_density = np.stack(np.split(csv_density, len(self.normalizer), -1))
+        csv_density = np.asarray([m/n for m,n in zip(csv_density, self.normalizer)])
+        csv_density = csv_density.transpose(1,2,0)
 
-        arr = np.array(pil_image.convert("RGB"))
-        crop_y = (arr.shape[0] - self.resolution) // 2
-        crop_x = (arr.shape[1] - self.resolution) // 2
-        arr = arr[crop_y : crop_y + self.resolution, crop_x : crop_x + self.resolution]
-        arr = arr.astype(np.float32) / 127.5 - 1
+        csv_density = csv_density.clip(0,1)
+        csv_density = 2*csv_density - 1
+        csv_density = csv_density.astype(np.float32)
 
-        out_dict = {}
+        out_dict = {"count": count.astype(np.float32)}
         if self.local_classes is not None:
             out_dict["y"] = np.array(self.local_classes[idx], dtype=np.int64)
-        return np.transpose(arr, [2, 0, 1]), out_dict
+        return np.transpose(np.concatenate([csv_density, image], axis=-1), [2, 0, 1]), out_dict
+
+
+def save_images(image, density, path):
+    density = np.repeat(density, 3, axis=-1)
+    image = np.concatenate([image, density], axis=1)
+    image = 127.5 * (image + 1)
+
+    tag = os.path.basename(path).split('.')[0]
+    cv2.imwrite("./results_train/"+tag+'.png', image[:,:,::-1])
