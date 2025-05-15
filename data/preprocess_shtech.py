@@ -222,7 +222,8 @@ def create_dot_map(locations, image_size):
     density = np.zeros(image_size[:-1])
     for x,y in locations:
         x, y = int(x)-1, int(y)-1
-        density[y,x] = 1.
+        if x < 1024 and y < 1024:
+            density[y,x] = 1.
     
     return density
 
