@@ -31,6 +31,9 @@ def main():
     model.to(dist_util.dev())
     schedule_sampler = create_named_schedule_sampler(args.schedule_sampler, diffusion)
 
+    args.normalizer = [float(value) for value in args.normalizer.split(',')]
+
+
     logger.log("creating data loader...")
     data = load_superres_data(
         args.data_dir,
@@ -38,6 +41,15 @@ def main():
         large_size=args.large_size,
         small_size=args.small_size,
         class_cond=args.class_cond,
+    )
+    data = load_superres_data(
+        data_dir=args.data_dir,
+        batch_size=args.batch_size,
+        large_size=args.large_size,
+        small_size=args.small_size,
+        class_cond=args.class_cond,
+        normalizer=[float(x) for x in args.normalizer.split(',')],
+        pred_channels=args.pred_channels,
     )
 
     logger.log("training...")
@@ -60,17 +72,19 @@ def main():
     ).run_loop()
 
 
-def load_superres_data(data_dir, batch_size, large_size, small_size, class_cond=False):
+def load_superres_data(data_dir, batch_size, large_size, small_size, normalizer, pred_channels, class_cond=False):
     data = load_data(
         data_dir=data_dir,
         batch_size=batch_size,
         image_size=large_size,
         class_cond=class_cond,
+        normalizer=normalizer,
+        pred_channels=pred_channels,
     )
     for large_batch, model_kwargs in data:
-        model_kwargs["low_res"] = F.interpolate(large_batch, small_size, mode="area")
+        # model_kwargs["low_res"] = F.interpolate(large_batch, small_size, mode="area")
+        large_batch, model_kwargs["low_res"] = large_batch[:,:pred_channels], large_batch[:,pred_channels:]
         yield large_batch, model_kwargs
-
 
 def create_argparser():
     defaults = dict(
@@ -87,6 +101,8 @@ def create_argparser():
         resume_checkpoint="",
         use_fp16=False,
         fp16_scale_growth=1e-3,
+        normalizer='0.2',
+        pred_channels=3,
     )
     defaults.update(sr_model_and_diffusion_defaults())
     parser = argparse.ArgumentParser()
